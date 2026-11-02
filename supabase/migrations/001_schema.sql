@@ -7,7 +7,10 @@ create extension if not exists "pgcrypto";
 
 -- ---------- Enums ----------
 create type mic_type as enum ('dynamic', 'condenser', 'usb', 'ribbon');
-create type saas_use_case as enum ('podcast', 'youtube', 'short_form', 'voiceover', 'music');
+-- Every use case is declared here, including those 002 and 008 add. Postgres can't use an enum
+-- value in the same transaction that adds it, and 002/008 insert rows right after adding theirs.
+create type saas_use_case as enum ('podcast', 'youtube', 'short_form', 'voiceover', 'music',
+  'live_stream', 'courses', 'lead_gen', 'localization', 'faceless', 'agency', 'network');
 
 -- ---------- SaaS bundles ----------
 create table public.saas_bundles (

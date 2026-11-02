@@ -3,10 +3,11 @@ import type { SaasBundle } from "@/components/RoiCalculator";
 import type { HardwareBundle } from "@/components/GearChecker";
 import type { GearItem } from "@/lib/gear";
 import { demo, demoEnabled } from "@/lib/demo";
+import { supabasePublicKey, supabaseUrl } from "@/lib/supabase-env";
 
 export async function getSaasBundles(): Promise<SaasBundle[]> {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const url = supabaseUrl();
+  const key = supabasePublicKey();
   if (!url || !key) {
     if (demoEnabled()) return demo.saasBundles() as SaasBundle[];
     console.error("Supabase env vars are missing; showing no bundles.");
@@ -27,8 +28,8 @@ export async function getSaasBundles(): Promise<SaasBundle[]> {
 export type RescueStack = { slug: string; name: string; monthly_price_usd: number; price_checked_at: string | null };
 
 export async function getGearData(): Promise<{ catalog: GearItem[]; bundles: HardwareBundle[]; rescue: RescueStack | null }> {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const url = supabaseUrl();
+  const key = supabasePublicKey();
   if (!url || !key) {
     if (demoEnabled()) {
       const chains = ["mic_chain", "field_recorder", "stream_desk"];

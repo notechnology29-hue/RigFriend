@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { demo, demoEnabled } from "@/lib/demo";
+import { supabasePublicKey, supabaseUrl } from "@/lib/supabase-env";
 
 export type SoftwareBuild = {
   slug: string;
@@ -42,8 +43,8 @@ const GEAR_COLS =
   "slug, name, people_count, category, description, cash_price_usd, installment_months, installment_retailer, installment_monthly_usd, mic_type, requires_phantom_power, min_preamp_gain_db, interface_max_gain_db, inline_preamp_gain_db, interface_has_phantom, signal_chain_rules, price_checked_at, components, updated_at";
 
 function client() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const url = supabaseUrl();
+  const key = supabasePublicKey();
   if (!url || !key) return null;
   return createClient(url, key);
 }
