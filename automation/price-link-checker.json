@@ -1,0 +1,136 @@
+{
+  "name": "Price & link checker",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "triggerAtDay": [
+                1
+              ],
+              "triggerAtHour": 7
+            }
+          ]
+        }
+      },
+      "id": "3f106acb-a5e6-4dd4-a27d-c32e9d5cf240",
+      "name": "Every Monday 7am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Load every active product from Supabase.\nconst base = $env.SUPABASE_URL;\nconst key = $env.SUPABASE_SERVICE_KEY;\nif (!base || !key) throw new Error('Set SUPABASE_URL and SUPABASE_SERVICE_KEY in n8n environment variables');\n\nconst rows = await this.helpers.httpRequest({\n  method: 'GET',\n  url: `${base}/rest/v1/tracked_products`,\n  qs: { is_active: 'eq.true', select: '*', order: 'slug' },\n  headers: { apikey: key, Authorization: `Bearer ${key}` },\n  json: true,\n});\nreturn rows.map((r) => ({ json: r }));\n"
+      },
+      "id": "bb1696ed-08fd-4763-a3a9-26e50a367aed",
+      "name": "Load products",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Check each product page for price, stock and link health.\n// Reads the retailer/vendor page (product_url), never the affiliate link:\n// automated hits on tracking links count as fake clicks.\nconst UA = 'Mozilla/5.0 (compatible; StackCheckBot/1.0; weekly price check)';\nconst DELAY_MS = 2000;               // be polite: one request every 2 seconds\nconst PRICE_TOLERANCE_PCT = 0.02;    // ignore changes under 2% ...\nconst PRICE_TOLERANCE_USD = 2;       // ... or under $2\nconst MANUAL_CONFIRM_DAYS = 30;      // SaaS prices: ask you to confirm monthly\n\nconst sleep = (ms) => new Promise((r) => setTimeout(r, ms));\n\nfunction jsonLdBlocks(html) {\n  const out = [];\n  const re = /<script[^>]*type=[\"']application\\/ld\\+json[\"'][^>]*>([\\s\\S]*?)<\\/script>/gi;\n  let m;\n  while ((m = re.exec(html))) {\n    try { out.push(JSON.parse(m[1].trim())); } catch (e) { /* skip malformed block */ }\n  }\n  return out;\n}\n\nfunction collectOffers(node, found) {\n  if (!node || typeof node !== 'object') return;\n  if (Array.isArray(node)) { node.forEach((n) => collectOffers(n, found)); return; }\n  const types = [].concat(node['@type'] || []);\n  if (types.includes('Product') && node.offers) {\n    for (const o of [].concat(node.offers)) {\n      if (!o || typeof o !== 'object') continue;\n      const spec = Array.isArray(o.priceSpecification) ? o.priceSpecification[0] : o.priceSpecification;\n      const price = Number(o.price ?? o.lowPrice ?? spec?.price);\n      const currency = o.priceCurrency || spec?.priceCurrency || null;\n      const availability = o.availability ? String(o.availability).split('/').pop() : null;\n      if (Number.isFinite(price) && price > 0) found.push({ price, currency, availability });\n    }\n  }\n  for (const v of Object.values(node)) collectOffers(v, found);\n}\n\nfunction affiliateLinkProblem(url) {\n  if (!url) return 'No affiliate link set';\n  if (!/^https:\\/\\//i.test(url)) return 'Affiliate link is not https';\n  if (/example\\.com/i.test(url)) return 'Affiliate link is still a placeholder';\n  return null;\n}\n\nconst now = new Date();\nconst results = [];\n\nfor (const item of $input.all()) {\n  const p = item.json;\n  const r = { slug: p.slug, checked_at: now.toISOString(), http_status: null, price: null, availability: null, issues: [] };\n\n  const affProblem = affiliateLinkProblem(p.affiliate_url);\n  if (affProblem) r.issues.push({ type: 'bad_affiliate_link', new_value: p.affiliate_url || null, details: affProblem });\n\n  if (p.price_source === 'manual') {\n    const confirmed = p.price_confirmed_at ? new Date(p.price_confirmed_at) : null;\n    if (!confirmed || (now - confirmed) / 86400000 > MANUAL_CONFIRM_DAYS) {\n      r.issues.push({ type: 'confirm_price', old_value: p.approved_price_usd != null ? String(p.approved_price_usd) : null,\n        details: `Check the vendor's pricing page and approve if $${p.approved_price_usd}/mo is still right` });\n    }\n  }\n\n  if (!p.product_url) {\n    r.issues.push({ type: 'missing_product_url', details: 'Add the retailer or vendor page URL so this can be checked' });\n    results.push({ ...r, http_status: null });\n    continue;\n  }\n\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'GET',\n      url: p.product_url,\n      headers: { 'User-Agent': UA, Accept: 'text/html' },\n      returnFullResponse: true,\n      ignoreHttpStatusErrors: true,\n      json: false,\n      timeout: 20000,\n    });\n    r.http_status = res.statusCode;\n\n    if (res.statusCode === 404 || res.statusCode === 410) {\n      r.issues.push({ type: 'dead_link', details: `Product page returned HTTP ${res.statusCode}` });\n    } else if (res.statusCode >= 400) {\n      r.issues.push({ type: 'blocked', details: `HTTP ${res.statusCode}: the site refused the check. Use the network's product feed or check by hand.` });\n    } else if (p.price_source === 'jsonld') {\n      const offers = [];\n      jsonLdBlocks(String(res.body ?? '')).forEach((b) => collectOffers(b, offers));\n      const offer = offers.find((o) => !o.currency || o.currency === 'USD');\n\n      if (!offer) {\n        r.issues.push({ type: 'no_price', details: 'No structured price found on the page' });\n      } else {\n        r.price = offer.price;\n        r.availability = offer.availability;\n        const old = Number(p.approved_price_usd);\n        if (Number.isFinite(old)) {\n          const diff = Math.abs(offer.price - old);\n          if (diff > Math.max(PRICE_TOLERANCE_USD, old * PRICE_TOLERANCE_PCT)) {\n            r.issues.push({ type: 'price_change', old_value: String(old), new_value: String(offer.price),\n              details: `${offer.price > old ? 'Up' : 'Down'} $${diff.toFixed(2)}` });\n          }\n        }\n        if (/OutOfStock|SoldOut|Discontinued/i.test(offer.availability || '')) {\n          r.issues.push({ type: 'out_of_stock', details: offer.availability });\n        }\n      }\n    }\n  } catch (e) {\n    r.issues.push({ type: 'blocked', details: `Request failed: ${e.message}` });\n  }\n\n  results.push(r);\n  await sleep(DELAY_MS);\n}\n\nreturn [{ json: { results } }];\n"
+      },
+      "id": "8b0fd70c-668e-4678-a0a0-e0faff209d34",
+      "name": "Check pages",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Save results; only NEW issues come back, so each problem is emailed once.\nconst base = $env.SUPABASE_URL;\nconst key = $env.SUPABASE_SERVICE_KEY;\n\nconst newIssues = await this.helpers.httpRequest({\n  method: 'POST',\n  url: `${base}/rest/v1/rpc/record_check_results`,\n  headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },\n  body: { results: $input.first().json.results },\n  json: true,\n});\n\nif (!Array.isArray(newIssues) || newIssues.length === 0) return []; // nothing new: stop, no email\n\nconst LABELS = {\n  price_change: 'Price changed',\n  out_of_stock: 'Out of stock',\n  dead_link: 'Product page is gone',\n  blocked: 'Could not check',\n  no_price: 'No price found',\n  bad_affiliate_link: 'Affiliate link problem',\n  missing_product_url: 'Needs a product URL',\n  confirm_price: 'Confirm SaaS price',\n};\n\nconst groups = {};\nfor (const i of newIssues) (groups[i.issue_type] ||= []).push(i);\n\nconst sections = Object.entries(groups).map(([type, list]) => {\n  const lines = list.map((i) => {\n    const change = i.issue_type === 'price_change' ? ` ($${i.old_value} -> $${i.new_value})` : '';\n    return `- ${i.product_name}${change}: ${i.details || ''}\\n  approve: select approve_review('${i.id}');\\n  dismiss: select dismiss_review('${i.id}');`;\n  });\n  return `${LABELS[type] || type} (${list.length})\\n${lines.join('\\n')}`;\n});\n\nconst n = newIssues.length;\nreturn [{\n  json: {\n    subject: `Price & link check: ${n} new item${n === 1 ? '' : 's'} to review`,\n    body: `${sections.join('\\n\\n')}\\n\\nNothing changes on the site until you approve.\\nRun the lines above in the Supabase SQL editor.`,\n  },\n}];\n"
+      },
+      "id": "c1e8a8b1-c71c-445d-887f-7992eb44e9c6",
+      "name": "Save results",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@yourdomain.com",
+        "toEmail": "you@yourdomain.com",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.body }}",
+        "options": {}
+      },
+      "id": "19fff500-29ad-4812-9a14-c4395a6e7653",
+      "name": "Email me",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        960,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Every Monday 7am": {
+      "main": [
+        [
+          {
+            "node": "Load products",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load products": {
+      "main": [
+        [
+          {
+            "node": "Check pages",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check pages": {
+      "main": [
+        [
+          {
+            "node": "Save results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save results": {
+      "main": [
+        [
+          {
+            "node": "Email me",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
